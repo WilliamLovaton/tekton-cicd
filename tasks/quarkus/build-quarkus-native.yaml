@@ -1,0 +1,35 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-quarkus-native
+spec:
+  params:
+  - name: MANDREL_IMAGE
+    type: string
+    description: image used to compile to native code
+    default: "registry.access.redhat.com/quarkus/mandrel-23-rhel8:latest"
+  - name: MANDREL_XMX
+    type: string
+    description: Xmx memory setting asssigned to the Mandrel compiler
+    default: "4g"
+  steps:
+  - name: build
+    image: $(params.MANDREL_IMAGE)
+    script: |
+      #!/usr/bin/env bash
+
+      echo "Running in $(pwd)"
+      
+      [[ -f target/native-sources/native-image.args ]] || ( echo 'There are no native source available in this workspace, have you built the project with -Dquarkus.package.type=native-source?'; exit 1)
+
+      cd target/native-sources
+
+      native-image $(cat native-image.args) -J-Xmx$(params.MANDREL_XMX) -march=native
+
+      # The Dockerfile.native expects the native executable to be under target directory
+      cp *-runner ..
+
+    workingDir: $(workspaces.source.path)
+  workspaces:
+    - name: source
+      description: The workspace containing the Quarkus maven project
