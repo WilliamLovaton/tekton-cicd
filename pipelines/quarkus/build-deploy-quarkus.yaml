@@ -1,0 +1,224 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-deploy-quarkus
+spec:
+  workspaces:
+  - name: shared-workspace
+  - name: maven-settings
+  - name: maven-repo-cache
+  params:
+  - name: git-url
+    type: string
+    description: url of the git repo for the code of deployment
+  - name: git-revision
+    type: string
+    description: revision to be used from repo of the code for deployment
+    default: "main"
+  - name: IMAGE
+    type: string
+    description: image to be build from the code
+  - name: app-name
+    type: string
+    description: application name to deploy
+  - name: native-build
+    type: string
+    description: Create a native build or a JVM build
+    default: "false"
+  - name: replicas
+    type: "string"
+    description: Number of replicas for the deployment
+    default: 1
+  - name: cpu-request
+    type: string
+    description: CPU request for the deployment
+    default: "20m"
+  - name: mem-request
+    type: string
+    description: Memory request for the deployment
+    default: "64Mi"
+  - name: cpu-limit
+    type: string
+    description: CPU limit for the deployment
+    default: "1"
+  - name: mem-limit
+    type: string
+    description: Memory limit for the deployment
+    default: "256Mi"
+  tasks:
+  - name: fetch-repository
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: git-clone
+      - name: version
+        value: "0.9"
+    workspaces:
+    - name: output
+      workspace: shared-workspace
+    params:
+    - name: url
+      value: $(params.git-url)
+    - name: revision
+      value: $(params.git-revision)
+  - name: build-java
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: maven
+      - name: version
+        value: "0.3"
+    params:
+    - name: GOALS
+      value: 
+        - package
+        - -Dmaven.repo.local=$(workspaces.maven-local-repo.path)
+    - name: MAVEN_IMAGE
+      value: registry.redhat.io/ubi8/openjdk-17:latest
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    - name: maven-settings
+      workspace: maven-settings
+    - name: maven-local-repo
+      workspace: maven-repo-cache
+    runAfter:
+    - fetch-repository
+    when:
+    - input: "$(params.native-build)"
+      operator: in
+      values: ["false"]
+  - name: build-java-for-native
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: maven
+      - name: version
+        value: "0.3"
+    params:
+    - name: GOALS
+      value:
+        - package
+        - -Dquarkus.package.type=native-sources
+        - -Dmaven.repo.local=$(workspaces.maven-local-repo.path)
+    - name: MAVEN_IMAGE
+      value: registry.redhat.io/ubi8/openjdk-17:latest
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    - name: maven-settings
+      workspace: maven-settings
+    - name: maven-local-repo
+      workspace: maven-repo-cache
+    runAfter:
+    - fetch-repository
+    when:
+    - input: "$(params.native-build)"
+      operator: in
+      values: ["true"]
+  - name: build-native
+    taskRef:
+      resolver: git
+      params:
+      - name: url
+        value: https://github.com/WilliamLovaton/tekton-cicd.git
+      - name: revision
+        value: main
+      - name: pathInRepo
+        value: tasks/quarkus/build-quarkus-native.yaml
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    runAfter:
+    - build-java-for-native
+    when:
+    - input: "$(params.native-build)"
+      operator: in
+      values: ["true"]
+  - name: build-image-java
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: buildah
+      - name: version
+        value: "0.8"
+    params:
+    - name: DOCKERFILE
+      value: src/main/docker/Dockerfile.jvm
+    - name: IMAGE
+      value: $(params.IMAGE)
+    - name: TLSVERIFY
+      value: "false"
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    runAfter:
+    - build-java
+    when:
+    - input: "$(params.native-build)"
+      operator: in
+      values: ["false"]
+  - name: build-image-native
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: buildah
+      - name: version
+        value: "0.8"
+    params:
+    - name: DOCKERFILE
+      value: src/main/docker/Dockerfile.native
+    - name: IMAGE
+      value: $(params.IMAGE)
+    - name: TLSVERIFY
+      value: "false"
+    workspaces:
+    - name: source
+      workspace: shared-workspace
+    runAfter:
+    - build-native
+    when:
+    - input: "$(params.native-build)"
+      operator: in
+      values: ["true"]
+  - name: deploy-local
+    taskRef:
+      resolver: hub
+      params:
+      - name: kind
+        value: task
+      - name: name
+        value: openshift-client
+      - name: version
+        value: "0.2"
+    params:
+    - name: VERSION
+      value: latest
+    - name: SCRIPT
+      value: |
+        oc create deployment $(params.app-name) --image $(params.IMAGE) --replicas 0 --port 8080 && \
+        oc set resources deployment $(params.app-name) --requests=cpu=$(params.cpu-request),memory=$(params.mem-request) --limits=cpu=$(params.cpu-limit),memory=$(params.mem-limit) && \
+        oc set probe deployment $(params.app-name) --startup --open-tcp 8080 --failure-threshold 60 --period-seconds 1 --timeout-seconds 1 && \
+        oc set probe deployment $(params.app-name) --liveness --get-url http://:8080/q/health/live --period-seconds 10 --timeout-seconds 5 && \
+        oc set probe deployment $(params.app-name) --readiness --get-url http://:8080/q/health/ready --period-seconds 10 --timeout-seconds 5 && \
+        oc expose deployment $(params.app-name) && \
+        oc expose service $(params.app-name) && \
+        oc scale deployment/$(params.app-name) --replicas=$(params.replicas)
+    runAfter:
+    - build-image-java
+    - build-image-native
