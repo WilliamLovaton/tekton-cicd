@@ -1,0 +1,48 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-deploy-quarkus-
+spec:
+  params:
+  - name: git-url
+    value: https://github.com/WilliamLovaton/dummy-perf
+  - name: git-revision
+    value: main
+  - name: IMAGE
+    value: server-quay-enterprise.apps.wlovaton.tamlab.rdu2.redhat.com/banregio/dummy-perf-jvm
+  - name: app-name
+    value: dummy-perf-jvm
+  - name: native-build
+    value: "false"
+  - name: replicas
+    value: "1"
+  - name: cpu-request
+    value: 20m
+  - name: mem-request
+    value: 64Mi
+  - name: cpu-limit
+    value: "1"
+  - name: mem-limit
+    value: 256Mi
+  pipelineRef:
+    resolver: git
+    params:
+    - name: url
+      value: https://github.com/WilliamLovaton/tekton-cicd
+    - name: revision
+      value: main
+    - name: pathInRepo
+      value: pipelines/quarkus/build-deploy-quarkus.yaml
+  taskRunTemplate:
+    serviceAccountName: pipeline
+  timeouts:
+    pipeline: 1h0m0s
+  workspaces:
+  - name: shared-workspace
+    persistentVolumeClaim:
+      claimName: shared-workspace
+  - emptyDir: {}
+    name: maven-settings
+  - name: maven-repo-cache
+    persistentVolumeClaim:
+      claimName: maven-repo-cache
